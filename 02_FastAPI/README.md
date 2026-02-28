@@ -877,3 +877,571 @@ def delete_user(user_id: int):
 | **Status Codes**      | Set `status_code=status.HTTP_XXX` on the route or in `HTTPException` / `JSONResponse`. |
 | **Exception Handling**| Use `raise HTTPException(...)` for control flow; use `@app.exception_handler` for global format. |
 
+---
+
+# 5️⃣ Dependency Injection (DI) — Deep Dive
+
+---
+
+## Why Does Dependency Injection Exist?
+
+### The Core Problem
+
+Every real API needs **shared resources** — a database connection, an authentication check, a logger, a settings object, a rate limiter, and so on. Every route function needs these things. The question is: **how do you give them to a function cleanly?**
+
+Before Dependency Injection, developers had one answer: **create them manually, inside the function, or rely on global variables**. Both approaches cause serious problems.
+
+---
+
+## What Problems We Face WITHOUT Dependency Injection
+
+### Problem 1: Duplicate Code Everywhere
+
+Every single route function creates the same resources from scratch:
+
+```python
+# WITHOUT DI — messy and repeated everywhere
+import sqlite3
+
+def get_users():
+    conn = sqlite3.connect("database.db")  # repeated in every function
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users")
+    users = cursor.fetchall()
+    conn.close()
+    return users
+
+def get_products():
+    conn = sqlite3.connect("database.db")  # same code, repeated again
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM products")
+    products = cursor.fetchall()
+    conn.close()
+    return products
+
+def get_orders():
+    conn = sqlite3.connect("database.db")  # and again...
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM orders")
+    orders = cursor.fetchall()
+    conn.close()
+    return orders
+```
+
+> If you have 50 routes, you write the same database setup code **50 times**.
+> If the database connection string changes, you update **50 places**.
+
+---
+
+### Problem 2: Authentication Logic Repeated
+
+```python
+# WITHOUT DI — auth check copy-pasted everywhere
+def get_profile(token: str):
+    if not token or token != "secret-token":   # repeated
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"profile": "Ahmad"}
+
+def get_orders(token: str):
+    if not token or token != "secret-token":   # same check, again
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"orders": []}
+
+def delete_account(token: str):
+    if not token or token != "secret-token":   # and again
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"deleted": True}
+```
+
+> Changing how authentication works means hunting for every copy in every route.
+
+---
+
+### Problem 3: Global Variables — Silent Bugs
+
+```python
+# WITHOUT DI — using globals (dangerous)
+import sqlite3
+
+db_connection = sqlite3.connect("database.db")  # one global connection
+
+def get_users():
+    cursor = db_connection.cursor()   # shared state between requests
+    cursor.execute("SELECT * FROM users")
+    return cursor.fetchall()
+```
+
+Global variables cause:
+
+- **Race conditions** when multiple requests run at the same time
+- **Stale connections** that break silently
+- **Impossible to test** — you cannot swap the database for a fake one in tests
+
+---
+
+### Problem 4: Hard to Test
+
+```python
+# WITHOUT DI — untestable because database is hardcoded inside
+def get_user_profile(user_id: int):
+    conn = sqlite3.connect("production.db")  # hardcoded — cannot fake it in tests
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    return cursor.fetchone()
+```
+
+To test this, you need a real database running. You cannot inject a fake/mock database. Tests become slow, fragile, and dependent on real infrastructure.
+
+---
+
+### Problem 5: Impossible to Change One Thing Easily
+
+Imagine switching from SQLite to PostgreSQL. Without DI, you must:
+
+1. Find every file that imports `sqlite3`
+2. Change each function manually
+3. Hope you didn't miss any
+4. Break things you didn't intend to
+
+---
+
+## Why Dependency Injection Came to Market
+
+### The History
+
+As applications grew larger, developers noticed the same patterns of pain:
+
+- **Java developers** in early 2000s created **Spring Framework** with DI as its core idea
+- **Angular** brought DI to the frontend world
+- **FastAPI** built DI directly into the framework — one of the first Python frameworks to do this properly
+
+The motivation was simple:
+
+> "A function should **receive** what it needs, not **create** what it needs."
+
+This is the essence of **Inversion of Control (IoC)** — instead of a function controlling how its dependencies are created, something **outside** (the framework) controls it and **injects** it in.
+
+### One-Line Definition
+
+> **Dependency Injection means: a function declares what it needs, and the framework provides it automatically.**
+
+---
+
+## How FastAPI Dependency Injection Works
+
+FastAPI uses the `Depends()` function. You write a **dependency function** (a normal Python function), and FastAPI calls it for you before your route runs, then **injects** the result.
+
+```
+Route function declares: "I need a database connection"
+         ↓
+FastAPI calls the dependency function
+         ↓
+FastAPI passes the result into your route function automatically
+```
+
+---
+
+## Code: Without DI vs With DI
+
+### Example 1 — Database Connection
+
+**Without DI (repeated code):**
+
+```python
+from fastapi import FastAPI
+import sqlite3
+
+app = FastAPI()
+
+@app.get("/users")
+def get_users():
+    conn = sqlite3.connect("database.db")   # created manually every time
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users")
+    users = cursor.fetchall()
+    conn.close()
+    return {"users": users}
+
+@app.get("/products")
+def get_products():
+    conn = sqlite3.connect("database.db")   # same setup repeated
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM products")
+    products = cursor.fetchall()
+    conn.close()
+    return {"products": products}
+```
+
+**With DI (clean, single source of truth):**
+
+```python
+from fastapi import FastAPI, Depends
+import sqlite3
+
+app = FastAPI()
+
+# Define once — reuse everywhere
+def get_db():
+    conn = sqlite3.connect("database.db")
+    try:
+        yield conn          # yield: FastAPI also handles cleanup automatically
+    finally:
+        conn.close()        # always closes, even if an error occurs
+
+@app.get("/users")
+def get_users(db=Depends(get_db)):    # FastAPI injects db for you
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM users")
+    return {"users": cursor.fetchall()}
+
+@app.get("/products")
+def get_products(db=Depends(get_db)):  # same dependency, injected again
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM products")
+    return {"products": cursor.fetchall()}
+```
+
+> You wrote `get_db` **once**. FastAPI opens and closes the connection **for every request** automatically.
+
+---
+
+### Example 2 — Authentication / Security
+
+**Without DI (copy-pasted auth):**
+
+```python
+from fastapi import FastAPI, HTTPException, Header
+from typing import Optional
+
+app = FastAPI()
+
+@app.get("/profile")
+def get_profile(x_token: Optional[str] = Header(None)):
+    if x_token != "my-secret-token":           # repeated
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"profile": "Ahmad"}
+
+@app.get("/orders")
+def get_orders(x_token: Optional[str] = Header(None)):
+    if x_token != "my-secret-token":           # same check again
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"orders": []}
+
+@app.delete("/account")
+def delete_account(x_token: Optional[str] = Header(None)):
+    if x_token != "my-secret-token":           # and again
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"deleted": True}
+```
+
+**With DI (one place, always consistent):**
+
+```python
+from fastapi import FastAPI, Depends, HTTPException, Header
+from typing import Optional
+
+app = FastAPI()
+
+# Authentication logic lives in ONE place
+def verify_token(x_token: Optional[str] = Header(None)):
+    if x_token != "my-secret-token":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return x_token   # return the valid token (optional, but useful)
+
+@app.get("/profile")
+def get_profile(token: str = Depends(verify_token)):   # clean
+    return {"profile": "Ahmad"}
+
+@app.get("/orders")
+def get_orders(token: str = Depends(verify_token)):    # clean
+    return {"orders": []}
+
+@app.delete("/account")
+def delete_account(token: str = Depends(verify_token)): # clean
+    return {"deleted": True}
+```
+
+> Change the auth logic in **one function** — all routes benefit instantly.
+
+---
+
+### Example 3 — Query Parameters (Pagination)
+
+**Without DI (repeated pagination setup):**
+
+```python
+@app.get("/users")
+def get_users(skip: int = 0, limit: int = 10):
+    # skip and limit repeated in every route that needs pagination
+    return {"skip": skip, "limit": limit}
+
+@app.get("/products")
+def get_products(skip: int = 0, limit: int = 10):
+    # same parameters defined again
+    return {"skip": skip, "limit": limit}
+```
+
+**With DI (shared pagination logic):**
+
+```python
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+# Pagination rules defined once
+def pagination(skip: int = 0, limit: int = 10):
+    if limit > 100:
+        limit = 100    # business rule enforced in one place
+    return {"skip": skip, "limit": limit}
+
+@app.get("/users")
+def get_users(page: dict = Depends(pagination)):
+    return {"users": [], "pagination": page}
+
+@app.get("/products")
+def get_products(page: dict = Depends(pagination)):
+    return {"products": [], "pagination": page}
+```
+
+---
+
+### Example 4 — Chaining Dependencies (Dependencies that depend on other dependencies)
+
+FastAPI supports **nested dependencies** — a dependency that itself uses another dependency.
+
+```python
+from fastapi import FastAPI, Depends, HTTPException, Header
+from typing import Optional
+
+app = FastAPI()
+
+# Step 1: Get token from header
+def get_token(x_token: Optional[str] = Header(None)) -> str:
+    if not x_token:
+        raise HTTPException(status_code=401, detail="Token missing")
+    return x_token
+
+# Step 2: Get current user from token (depends on get_token)
+def get_current_user(token: str = Depends(get_token)) -> dict:
+    if token != "admin-token":
+        raise HTTPException(status_code=403, detail="Invalid token")
+    return {"username": "Ahmad", "role": "admin"}
+
+# Step 3: Check if user is admin (depends on get_current_user)
+def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+# Route uses the whole chain in one line
+@app.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)):
+    return {"deleted_by": admin["username"], "user_id": user_id}
+```
+
+> FastAPI resolves the chain: `require_admin → get_current_user → get_token`. You just write `Depends(require_admin)`.
+
+---
+
+### Example 5 — Settings / Configuration Injection
+
+**Without DI:**
+
+```python
+import os
+
+@app.get("/config")
+def show_config():
+    secret_key = os.getenv("SECRET_KEY", "default")   # fetched manually each time
+    debug_mode = os.getenv("DEBUG", "false")
+    return {"secret_key": secret_key, "debug": debug_mode}
+```
+
+**With DI:**
+
+```python
+from fastapi import FastAPI, Depends
+import os
+
+app = FastAPI()
+
+class Settings:
+    secret_key: str = os.getenv("SECRET_KEY", "default")
+    debug: bool = os.getenv("DEBUG", "false").lower() == "true"
+    app_name: str = "My FastAPI App"
+
+def get_settings() -> Settings:
+    return Settings()
+
+@app.get("/config")
+def show_config(settings: Settings = Depends(get_settings)):
+    return {
+        "app": settings.app_name,
+        "debug": settings.debug
+    }
+```
+
+---
+
+## Types of Dependencies in FastAPI
+
+| Type | How to write | What it does |
+| ---- | ------------ | ------------ |
+| **Function dependency** | `def my_dep(): ...` | Plain function, returns a value |
+| **Generator dependency** | `def my_dep(): yield ...` | Opens and closes resources (DB, files) |
+| **Class dependency** | `class MyDep: def __init__(self, ...)` | Stateful, configurable dependency |
+| **Async dependency** | `async def my_dep(): ...` | For async resources (async DB, HTTP client) |
+
+### Class-based dependency example
+
+```python
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+class QueryFilter:
+    def __init__(self, search: str = "", sort: str = "asc"):
+        self.search = search
+        self.sort = sort
+
+@app.get("/search")
+def search_items(filters: QueryFilter = Depends()):
+    return {
+        "search": filters.search,
+        "sort": filters.sort
+    }
+```
+
+> `Depends()` with no argument tells FastAPI: "create an instance of `QueryFilter` and inject it".
+
+---
+
+## Benefits of Dependency Injection
+
+### Benefit 1: No Code Duplication (DRY — Don't Repeat Yourself)
+
+Write shared logic once. All routes use it. Change once — all routes benefit.
+
+```
+Without DI → 50 routes × (auth check + db setup) = 100 things to maintain
+With DI    → 2 dependency functions × 50 routes = 2 things to maintain
+```
+
+---
+
+### Benefit 2: Easy to Test
+
+With DI you can **override** any dependency in tests with a fake version:
+
+```python
+from fastapi.testclient import TestClient
+
+app = FastAPI()
+
+def get_db():
+    return "real-database-connection"
+
+@app.get("/data")
+def get_data(db=Depends(get_db)):
+    return {"db": db}
+
+# In tests — swap real DB with fake DB
+def fake_db():
+    return "fake-database-for-testing"
+
+app.dependency_overrides[get_db] = fake_db   # one line override
+
+client = TestClient(app)
+response = client.get("/data")
+print(response.json())   # {"db": "fake-database-for-testing"}
+```
+
+> Your tests run instantly, with no real database needed.
+
+---
+
+### Benefit 3: Automatic Resource Cleanup (using `yield`)
+
+```python
+def get_db():
+    db = open_database_connection()
+    try:
+        yield db          # FastAPI gives db to your route
+    finally:
+        db.close()        # FastAPI calls this AFTER your route finishes
+                          # even if an error occurred inside the route
+```
+
+FastAPI handles the cleanup lifecycle. You never forget to close a connection.
+
+---
+
+### Benefit 4: Centralized Business Rules
+
+Authentication, authorization, pagination limits, rate limiting — all in one place. Guaranteed to apply consistently across every route that uses the dependency.
+
+---
+
+### Benefit 5: Readable, Self-Documenting Routes
+
+```python
+# What does this route need? Read the function signature — it tells you everything.
+@app.get("/admin/report")
+def get_report(
+    page: dict = Depends(pagination),
+    admin: dict = Depends(require_admin),
+    db=Depends(get_db)
+):
+    return {"report": "data", "page": page}
+```
+
+> The dependencies **declare the contract** of the route. No hidden logic inside.
+
+---
+
+### Benefit 6: Composable and Layered Architecture
+
+You build **small, single-purpose dependencies** and combine them:
+
+```
+get_token
+    └── get_current_user
+            └── require_admin
+                    └── require_super_admin
+```
+
+Each layer adds one concern. Each layer is independently testable.
+
+---
+
+### Benefit 7: FastAPI Caches Dependencies per Request
+
+If two routes (or two sub-dependencies) use the same dependency in the same request, FastAPI calls it **only once** and reuses the result. This prevents creating two database connections for one request.
+
+```python
+# Both depend on get_current_user in the same request?
+# FastAPI resolves get_current_user ONCE and shares the result.
+def route(
+    user = Depends(get_current_user),
+    settings = Depends(get_settings)    # if get_settings also uses get_current_user internally
+):
+    ...
+```
+
+---
+
+## Summary: DI in One Table
+
+| Without DI | With DI |
+| ---------- | ------- |
+| Code repeated in every route | Written once, reused everywhere |
+| Hard to change shared logic | Change one function — done |
+| Cannot test without real infrastructure | Override dependencies for instant testing |
+| Global variables cause bugs | Each request gets its own clean resource |
+| Route function is cluttered | Route function is clean and readable |
+| Resource cleanup is manual | FastAPI handles cleanup with `yield` |
+
+### One-line teaching summary:
+
+> **Dependency Injection = declare what you need, FastAPI provides it — clean, reusable, testable.**
+

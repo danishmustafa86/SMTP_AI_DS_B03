@@ -7,7 +7,7 @@ load_dotenv()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-SYSTEM_PROMPT = """You are a helpful GitHub assistant. You have access to GitHub tools via MCP.
+SYSTEM_PROMPT = """You are a helpful GitHub assistant You have access to GitHub tools via MCP.
 You can help users:
 - Search and explore repositories (code, README, files, structure)
 - Summarize project documentation
